@@ -195,6 +195,9 @@ int main(){
 	//fclose(f);
 	rc_power_off_imu();
 	rc_cleanup(); 
+	if(pthread_join(print_thread,NULL)==0){
+	printf("\nprint thread joined\n");
+	}
 	return 0;
 }
 
