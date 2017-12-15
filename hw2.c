@@ -18,7 +18,7 @@
 rc_imu_data_t data;
 const float dt=1.0/SAMPLE_RATE;
 const float w=1.0/TIME_CONSTANT;
-float theta_a_raw, theta_g_raw=0, theta_a, theta_g,theta_f;
+float theta_a_raw, theta_g_raw=-PI/2, theta_a, theta_g,theta_f;
 rc_ringbuf_t accel_in_buf;
 rc_ringbuf_t accel_out_buf;
 rc_ringbuf_t gyro_in_buf;
