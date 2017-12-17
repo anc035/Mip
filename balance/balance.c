@@ -33,7 +33,6 @@ typedef struct setpoint_t{
 	control_state_t control_state;
 	float theta;		//body theta radians
 	float phi;		// wheel position radians
-	float phi_dot;		//rate at which phi ref updates radians/s
 	float gamma;		//body turn angle radians
 	float gamma_dot;	// rate of gamma setpoint updates radians/s
 }setpoint_t;
@@ -86,6 +85,8 @@ rc_ringbuf_t gyro_in_buf;
 rc_ringbuf_t gyro_out_buf;
 rc_ringbuf_t d1_in_buf;
 rc_ringbuf_t d1_out_buf;
+rc_ringbuf_t d2_in_buf;
+rc_ringbuf_t d2_out_buf;
 
 /*******************************************************************************
 * int main() 
@@ -113,36 +114,53 @@ int main(){
 
 	setpoint.control_state = DISENGAGED;
 	//setup ring bufs
-  accel_in_buf=rc_empty_ringbuf();
+  accel_in_buf =rc_empty_ringbuf();
   accel_out_buf=rc_empty_ringbuf();
-  gyro_in_buf=rc_empty_ringbuf();
-  gyro_out_buf=rc_empty_ringbuf();
-
-  if(rc_alloc_ringbuf(&accel_in_buf,5)<0){
+  gyro_in_buf  =rc_empty_ringbuf();
+  gyro_out_buf =rc_empty_ringbuf();
+	d1_in_buf    =rc_empty_ringbuf();
+	d1_out_buf   =rc_empty_ringbuf();
+	d2_in_buf    =rc_empty_ringbuf();
+	d2_out_buf   =rc_empty_ringbuf();
+	
+  if(rc_alloc_ringbuf(&accel_in_buf,4)<0){
           printf("accel in ringbuf allocation failed\n");
   }
-  if(rc_alloc_ringbuf(&accel_out_buf,5)<0){
+  if(rc_alloc_ringbuf(&accel_out_buf,4)<0){
           printf("accel out ringbuf allocation failed\n");
   }
-  if(rc_alloc_ringbuf(&gyro_in_buf,5)<0){
+  if(rc_alloc_ringbuf(&gyro_in_buf,4)<0){
           printf("gyro in ringbuf allocation failed\n");
   }
-  if(rc_alloc_ringbuf(&gyro_out_buf,5)<0){
+  if(rc_alloc_ringbuf(&gyro_out_buf,4)<0){
           printf("gyro out ringbuf allocation failed\n");
   }
-	
+	if(rc_alloc_ringbuf(&d1_in_buf,4)<0){
+          printf("d1 in ringbuf allocation failed\n");
+	}
+	if(rc_alloc_ringbuf(&d1_out_buf,4)<0){
+          printf("d1 out ringbuf allocation failed\n");
+	}
+	if(rc_alloc_ringbuf(&d2_in_buf,4)<0){
+          printf("d2 in ringbuf allocation failed\n");
+	}
+	if(rc_alloc_ringbuf(&d2_out_buf,4)<0){
+          printf("d2 out ringbuf allocation failed\n");
+	}
+
 	//sample battery thread
 	pthread_t battery_thread;
 	pthread_create(&battery_thread, NULL, battery_checker, (void*) NULL);
+	pthread_setschedprio(battery_thread, 22);
 	//wait for battery thread to make first read
 	while(state.vBatt==0 && rc_get_state()!=EXITING) rc_usleep(1000);
 
 	
 	//start printer if running from terminal
 	pthread_t print_thread;
-	if(isatty(fileno(stdout))){
-		pthread_create(&print_thread,NULL,printer,(void*) NULL);
-	}
+	pthread_create(&print_thread,NULL,printer,(void*) NULL);
+	pthread_setschedprio(print_thread,25);
+	
 
 	//set up IMU configuration
 	rc_imu_config_t imu_config= rc_default_imu_config();
@@ -157,9 +175,12 @@ int main(){
 	// start setpoint thread
 	pthread_t setpoint_thread;
 	pthread_create(&setpoint_thread, NULL, setpoint_manager, (void*) NULL);
+	pthread_setschedprio(setpoint_thread,35);
 
 	//Interrupt set last
 	rc_set_imu_interrupt_func(&balancer);
+
+
 	// done initializing so set state to RUNNING
 	rc_set_state(RUNNING); 
 	printf("\nHold your MIP upright to begin balancing\n");
@@ -176,6 +197,13 @@ int main(){
 	if(pthread_join(print_thread,NULL)==0){
 		printf("\nprint thread joined\n");
 	}
+	if(pthread_join(battery_thread,NULL)==0){
+		printf("\nbattery thread joined\n");
+	}
+	if(pthread_join(setpoint_thread,NULL)==0){
+		printf("\nsetpoint thread joined\n");
+	}
+
 	return 0;
 }
 
@@ -188,11 +216,9 @@ int main(){
 void* setpoint_manager(void* ptr){
 		//wait for IMU to settle
 		disengage_controller();
-		rc_usleep(2500000);
+		rc_usleep(200000);
 		rc_set_state(RUNNING);
-		rc_set_led(RED,0);
-		rc_set_led(GREEN,1);
-
+		
 		while(rc_get_state()!=EXITING){
 			// sleep at beginning to use continue statement
 			rc_usleep(1000000/SETPOINT_MANAGER_HZ);
@@ -205,13 +231,13 @@ void* setpoint_manager(void* ptr){
 				if(wait_for_start_condition()==0){
 					zero_out_controller();
 					engage_controller();
-				}
-				else 
-				setpoint.theta=0;
-				setpoint.phi_dot=0;
-				setpoint.gamma_dot =0;
-				continue;
+					rc_set_led(RED,0);
+					rc_set_led(GREEN,1);
+					}
 			}
+			
+			setpoint.theta=0.0;
+			setpoint.gamma_dot =0.0;
 		}
 		disengage_controller();
 		return NULL;
@@ -235,7 +261,7 @@ void balancer(){
 	// calculate accel angle of Z over Y
   float theta_a_raw=atan2(-imu_data.accel[2],imu_data.accel[1]);
   // Euler integration of gyro data X 
-  static float theta_g_raw=0;
+  static float theta_g_raw=-PI/2;
 	theta_g_raw=theta_g_raw+imu_data.gyro[0]*DT_D1*DEG_TO_RAD;
 
 	//obtain encoder positions and convert to wheel angles
@@ -287,7 +313,7 @@ void balancer(){
 	//check for a tipover
 	if(fabs(state.theta)>TIP_ANGLE){
 		disengage_controller();
-		printf("tip detected \n");
+		printf("\ntip detected \n");
 		return;
 	}
 
@@ -296,12 +322,49 @@ void balancer(){
  * Input to D1 is theta error(setpoint-state). Then scale output u to compensate
  * for changing battery voltage.
 *******************************************************************************/
-	float d1_gain=D1_GAIN * V_NOMINAL/state.vBatt;
-		
+	float d1_gain=D1_GAIN; //*(V_NOMINAL/state.vBatt);
+	float u1;
+	rc_insert_new_ringbuf_value(&d1_in_buf,setpoint.theta-state.theta);
+	//u1=rc_get_ringbuf_value(&d1_out_buf,0);
+	//rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
+	float theta      =rc_get_ringbuf_value(&d1_in_buf,0);
+	float theta_last =rc_get_ringbuf_value(&d1_in_buf,1);
+	float theta_last2=rc_get_ringbuf_value(&d1_in_buf,2);
+	float u1_last    =rc_get_ringbuf_value(&d1_out_buf,1);
+	float u1_last2   =rc_get_ringbuf_value(&d1_out_buf,2);
+	u1=d1_gain*(3.093*theta-4.86000*theta_last+1.84*theta_last2)+1.379000*u1_last	\
+			 																			-0.3793*u1_last2;
+	printf("\n uout= %f",theta);
+	state.d1_out=u1;
+	rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
+
+/*******************************************************************************
+*Inner loop saturation check if saturated over a second disable controller
+*
+*******************************************************************************/
+	if(fabs(state.d1_out)>0.95) inner_saturation_counter++;
+	else inner_saturation_counter = 0;
+	//if saturate for a second disable
+	if(inner_saturation_counter > (SAMPLE_RATE_D1_HZ*D1_SATURATION_TIMEOUT)){
+		printf("inner loop controller saturated \n");
+		disengage_controller();
+		inner_saturation_counter = 0;
+		return;
+	}
+
+/*******************************************************************************
+ * Send signal to motors
+ * add D1 balance control u and D3 steering control
+ *multiplied by polarity to enure direction
+*******************************************************************************/
+	dutyL=state.d1_out;//-state.d3_out;
+	dutyR=state.d1_out;//+state.d3_out;
+	rc_set_motor(MOTOR_CHANNEL_L,MOTOR_POLARITY_L * dutyL);
+	rc_set_motor(MOTOR_CHANNEL_R,MOTOR_POLARITY_R * dutyR);
 
 	return;
 }
-
+	
 /*******************************************************************************
 * zero_out_controller() 
 *	
@@ -312,6 +375,11 @@ int zero_out_controller(){
 	rc_reset_ringbuf(&accel_out_buf);
 	rc_reset_ringbuf(&gyro_in_buf);
 	rc_reset_ringbuf(&gyro_out_buf);
+	rc_reset_ringbuf(&d1_in_buf);
+	rc_reset_ringbuf(&d1_out_buf);
+	rc_reset_ringbuf(&d2_in_buf);
+	rc_reset_ringbuf(&d2_out_buf);
+
 	setpoint.theta =0.0f;
 	setpoint.phi   =0.0f;
 	setpoint.gamma =0.0f;
@@ -327,6 +395,7 @@ int zero_out_controller(){
 int disengage_controller(){
 	rc_disable_motors();
 	setpoint.control_state = DISENGAGED;
+	rc_set_led(RED,1);
 	return 0;
 }
 
@@ -403,7 +472,7 @@ void* printer(void* ptr){
 			printf("  D1_u   |");
 			printf("  D3_u   |");
 			printf("  vBatt  |");
-			printf("arm_state|");
+			printf("control_state|");
 			printf("\n");
 		}
 		else if(new_rc_state==PAUSED && last_rc_state!=PAUSED){
@@ -422,8 +491,10 @@ void* printer(void* ptr){
 			printf("%7.3f  |", state.d3_out);
 			printf("%7.3f  |", state.vBatt);
 			
-			if(setpoint.control_state == ENGAGED) printf("  ENGAGED  |");
-			else printf("DISENGAGED |");
+		if(setpoint.control_state == ENGAGED) {
+				printf("  ENGAGED  |");
+		}
+		else printf("DISENGAGED |");
 			
 		}
 			fflush(stdout);
