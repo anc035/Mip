@@ -21,7 +21,7 @@
 #define V_NOMINAL	  	 7.4
 
 // inner loop controller 100hz
-#define D1_GAIN		   	 1.00000
+#define D1_GAIN		   	 1.09000
 #define D1_SATURATION_TIMEOUT	 0.4
 #define FILTER_W		 0.660     	 //complementary filter frequency
 

@@ -13,6 +13,7 @@
 // function declarations
 void on_pause_pressed();
 void on_pause_released();
+void comp_filter(float* theta_a,float* theta_g,float* theta_current);
 
 /*******************************************************************************
 * control_state_t
@@ -64,7 +65,6 @@ void balancer();
 //threads
 void* printer(void* ptr);
 void* battery_checker(void* ptr);
-void* setpoint_manager(void*ptr);
 void* outer_loop(void* ptr);
 //functions
 int zero_out_controller();
@@ -89,6 +89,9 @@ rc_ringbuf_t d1_out_buf;
 rc_ringbuf_t d2_in_buf;
 rc_ringbuf_t d2_out_buf;
 static float soft_start=0;
+float theta_a=0.0f;
+	float theta_g=0.0f; //ale
+
 
 /*******************************************************************************
 * int main() 
@@ -150,7 +153,7 @@ int main(){
           printf("d2 out ringbuf allocation failed\n");
 	}
 
-	//outer loop thread
+		//outer loop thread
 	pthread_t d2_thread;
 	pthread_create(&d2_thread,NULL,outer_loop, (void*) NULL);
 	pthread_setschedprio(d2_thread,60);
@@ -178,10 +181,6 @@ int main(){
 		rc_blink_led(RED,5,5);
 		return -1;
 	}
-	// start setpoint thread
-	pthread_t setpoint_thread;
-	pthread_create(&setpoint_thread, NULL, setpoint_manager, (void*) NULL);
-	pthread_setschedprio(setpoint_thread,35);
 
 	//Interrupt set last
 	rc_set_imu_interrupt_func(&balancer);
@@ -193,6 +192,13 @@ int main(){
 
 	// Keep looping until state changes to EXITING
 	while(rc_get_state()!=EXITING){
+		if(setpoint.control_state ==DISENGAGED){
+				if(wait_for_start_condition()==0){
+					engage_controller();
+					rc_set_led(RED,0);
+					rc_set_led(GREEN,1);
+					}
+			}
 		// always sleep at some point
 		rc_usleep(10000);
 	}
@@ -207,49 +213,11 @@ int main(){
 	if(pthread_join(battery_thread,NULL)==0){
 		printf("\nbattery thread joined\n");
 	}
-	if(pthread_join(setpoint_thread,NULL)==0){
-		printf("\nsetpoint thread joined\n");
-	}
 	if(pthread_join(d2_thread,NULL)==0){
 		printf("\nd2_thread joined\n");
 	}
 
 	return 0;
-}
-
-/*******************************************************************************
-* void setpoint_manager(void* ptr
-*	
-* Adjusts controller setpoint if radio control is used. Detects control engaging
-* called at SAMPLE_RATE_HZ (See configuration file)
-*******************************************************************************/
-void* setpoint_manager(void* ptr){
-		//wait for IMU to settle
-		disengage_controller();
-		rc_usleep(200000);
-		rc_set_state(RUNNING);
-		
-		while(rc_get_state()!=EXITING){
-			// sleep at beginning to use continue statement
-			rc_usleep(1000000/SETPOINT_MANAGER_HZ);
-
-			//do nothing if paused
-			if(rc_get_state() !=RUNNING) continue;
-
-			//if control disengaged wait for start condition
-			if(setpoint.control_state ==DISENGAGED){
-				if(wait_for_start_condition()==0){
-					zero_out_controller();
-					engage_controller();
-					rc_set_led(RED,0);
-					rc_set_led(GREEN,1);
-					}
-			}
-			
-			setpoint.gamma_dot =0.0;
-		}
-		disengage_controller();
-		return NULL;
 }
 
 
@@ -263,10 +231,13 @@ void* setpoint_manager(void* ptr){
 void balancer(){
 	static int inner_saturation_counter =0;
 	float dutyL,dutyR;
+	comp_filter(&theta_a,&theta_g,&state.theta);
+	
 	/*****************************************************************
 	*Complementary filter LPF for Accelerometer and HPF for Gyroscope
 	*
 	*****************************************************************/
+	/*
 	float theta_a_raw=0;
 	// calculate accel angle of Z over Y
   theta_a_raw=atan2(-imu_data.accel[2],imu_data.accel[1]);
@@ -305,7 +276,8 @@ void balancer(){
 	//steering angle 
 	state.gamma =(state.wheelAngleR-state.wheelAngleL) \
 					*(WHEEL_RADIUS_M/TRACK_WIDTH_M);
-
+*/
+	
 	/*******************************************************
 	*check for exit conditions after state estimation
 	*******************************************************/
@@ -349,9 +321,9 @@ void balancer(){
 									+1.407*u1_last-0.04066*u1_last2;
 	rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
 	*/
-	state.d1_out=-1.0*soft_start*D1_GAIN*(3.55*rc_get_ringbuf_value(&d1_in_buf,0) \
-													  -5.863*rc_get_ringbuf_value(&d1_in_buf,1) \
-														+2.382*rc_get_ringbuf_value(&d1_in_buf,2))\
+	state.d1_out=soft_start*D1_GAIN*(-3.55*rc_get_ringbuf_value(&d1_in_buf,0) \
+													  +5.863*rc_get_ringbuf_value(&d1_in_buf,1) \
+														-2.382*rc_get_ringbuf_value(&d1_in_buf,2))\
 							 							+1.407*rc_get_ringbuf_value(&d1_out_buf,1)
 														-.04066*rc_get_ringbuf_value(&d1_out_buf,2);
 	rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
@@ -379,8 +351,8 @@ void balancer(){
  *multiplied by polarity to enure direction
 *******************************************************************************/
 
-	dutyL=state.d1_out;//-state.d3_out;
-	dutyR=state.d1_out;//+state.d3_out;
+	dutyL=state.d1_out;-state.d3_out;
+	dutyR=state.d1_out;+state.d3_out;
 	rc_set_motor(MOTOR_CHANNEL_L,MOTOR_POLARITY_L * dutyL);
 	rc_set_motor(MOTOR_CHANNEL_R,MOTOR_POLARITY_R * dutyR);
 
@@ -471,6 +443,7 @@ int wait_for_start_condition(){
 		if(checks >= checks_needed) return 0;
 		rc_usleep(wait_us);
 	}
+	printf("wait for start condition failed");
 	return -1;
 }
 
@@ -543,6 +516,7 @@ void* outer_loop(void* ptr){
 													 -.1439*rc_get_ringbuf_value(&d2_in_buf,1))  \
 													 +.5596*rc_get_ringbuf_value(&d2_out_buf,1);
 			rc_insert_new_ringbuf_value(&d2_out_buf,state.d2_out);	
+			setpoint.theta=state.d2_out;
 		if(state.d2_out >THETA_REF_MAX) state.d2_out=THETA_REF_MAX;
 		if(state.d2_out <-THETA_REF_MAX) state.d2_out=-THETA_REF_MAX;
 		}
@@ -601,3 +575,33 @@ void on_pause_pressed(){
 	rc_set_state(EXITING);
 	return;
 }
+
+//----------------------Comp Filter---------------------------------
+//----Determines the Body Angle of the MIP using a low pass and high pass filter--
+void comp_filter(float* theta_a,float* theta_g, float* theta_current){
+	//define variables
+	float dt = .01;
+	float w = FILTER_W;
+	float theta_a_raw=0;
+	static float theta_g_raw = 0;
+	static float last_theta_a_raw = 0;
+	static float last_theta_g_raw = 0;
+	static float last_theta_a = 0;
+	static float last_theta_g = 0;
+	//calculate angle from acceleration data
+	theta_a_raw = atan2(-imu_data.accel[2],imu_data.accel[1]);
+	//calculate rotation from start with gyro data
+	theta_g_raw = theta_g_raw + (float)dt*(imu_data.gyro[0]*DEG_TO_RAD) ;
+	//apply low pass filter on accelerometer
+	*theta_a = (w*dt*last_theta_a_raw)+((1-(w*dt))*last_theta_a);
+	//apply high pass filter on theta_g_raw
+	*theta_g = (1-(w*dt))*last_theta_g + theta_g_raw - last_theta_g_raw;
+	//get theta 
+	*theta_current = *theta_a + *theta_g + MOUNT_ANGLE;
+
+	//set last stuff
+	last_theta_a = *theta_a;
+	last_theta_g = *theta_g;
+	last_theta_g_raw = theta_g_raw;
+	last_theta_a_raw = theta_a_raw;
+} 
