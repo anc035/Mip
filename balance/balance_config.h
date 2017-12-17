@@ -23,7 +23,7 @@
 // inner loop controller 100hz
 #define D1_GAIN		   	 1.00000
 #define D1_SATURATION_TIMEOUT	 0.4
-#define FILTER_W		 0.600     	 //complementary filter frequency
+#define FILTER_W		 0.660     	 //complementary filter frequency
 
 //outer loop controller 20hz
 #define D2_GAIN 				1.00
@@ -42,11 +42,11 @@
 // Thread Loops
 #define BATTERY_CHECK_HZ	 		5
 #define SETPOINT_MANAGER_HZ   100
-#define PRINTF_HZ		 					30
+#define PRINTF_HZ		 					50
 
 // other
 #define TIP_ANGLE		 0.85
 #define START_ANGLE		 0.3
-#define START_DELAY		 0.55
+#define START_DELAY		 0.40
 #define PICKUP_DETECTION_TIME	 0.5
 #endif	//BALANCE_CONFIG

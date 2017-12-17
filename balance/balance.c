@@ -267,13 +267,13 @@ void balancer(){
 	*Complementary filter LPF for Accelerometer and HPF for Gyroscope
 	*
 	*****************************************************************/
-
+	float theta_a_raw=0;
 	// calculate accel angle of Z over Y
   theta_a_raw=atan2(-imu_data.accel[2],imu_data.accel[1]);
   // Euler integration of gyro data X 
   static float theta_g_raw=0;
-	theta_g_raw=theta_g_raw+imu_data.gyro[0]*DT_D1*DEG_TO_RAD;
-
+	theta_g_raw=theta_g_raw+(imu_data.gyro[0]*(float)DT_D1*DEG_TO_RAD);
+	
 	//obtain encoder positions and convert to wheel angles
 	state.wheelAngleR=(rc_get_encoder_pos(ENCODER_CHANNEL_R)*TWO_PI )\
 				/(ENCODER_POLARITY_R * GEARBOX *ENCODER_RES);
@@ -288,11 +288,10 @@ void balancer(){
   float gyro_out_old=rc_get_ringbuf_value(&gyro_out_buf,1);
 
   //LPF for accelerometer tf=(w*h)/(z+(w*h-1))
-  float theta_a=FILTER_W*DT_D1*(accel_in_old-accel_out_old)+accel_out_old;
+  float theta_a=FILTER_W*DT_D1*accel_in_old+((1-(FILTER_W*DT_D1))*accel_out_old);
  
   //HPF for gyroscope tf= (z-1)/(z+(w*h-1))
-  //float theta_g=.9983*(theta_g_raw-gyro_in_old)+.9965*gyro_out_old;
-  float theta_g=theta_g_raw-gyro_in_old-(FILTER_W*DT_D1-1.0)*gyro_out_old;
+  float theta_g=theta_g_raw-gyro_in_old+(1-(FILTER_W*DT_D1))*gyro_out_old;
 
 	//body theta estimate with an offset included
   state.theta=theta_a+theta_g+MOUNT_ANGLE;
@@ -326,7 +325,7 @@ void balancer(){
 
 	//check for a tipover
 	if(fabs(state.theta)>TIP_ANGLE){
-		disengage_controller();
+		//disengage_controller();
 		printf("\ntip detected state.theta %f\n",state.theta);
 		return;
 	}
