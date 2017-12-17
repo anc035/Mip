@@ -1,4 +1,4 @@
-/******************************************************************************
+/*****************************************************************************
 * balance_config.h
 *
 *Settings for balance.c
@@ -13,7 +13,7 @@
 #define DT_D2 		  	 0.05		// 1/sample_rate
 
 //Physical Properties
-#define MOUNT_ANGLE  	  	 0.47 
+#define MOUNT_ANGLE  	  	 0.29 
 #define GEARBOX		  	 35.57
 #define ENCODER_RES	  	 60
 #define WHEEL_RADIUS_M	  	 0.034
@@ -21,9 +21,13 @@
 #define V_NOMINAL	  	 7.4
 
 // inner loop controller 100hz
-#define D1_GAIN		   	 0.592
+#define D1_GAIN		   	 1.00000
 #define D1_SATURATION_TIMEOUT	 0.4
-#define FILTER_W		 5.000     	 //complementary filter frequency
+#define FILTER_W		 0.600     	 //complementary filter frequency
+
+//outer loop controller 20hz
+#define D2_GAIN 				1.00
+#define THETA_REF_MAX			.33
 
 // electrical hookups
 #define MOTOR_CHANNEL_L		 3
@@ -43,8 +47,6 @@
 // other
 #define TIP_ANGLE		 0.85
 #define START_ANGLE		 0.3
-#define START_DELAY		 0.35
+#define START_DELAY		 0.55
 #define PICKUP_DETECTION_TIME	 0.5
-#define ENABLE_POSITION_HOLD	 1		//enable position setpoint
-#define SOFT_START_SEC		 0.7
 #endif	//BALANCE_CONFIG

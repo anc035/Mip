@@ -65,6 +65,7 @@ void balancer();
 void* printer(void* ptr);
 void* battery_checker(void* ptr);
 void* setpoint_manager(void*ptr);
+void* outer_loop(void* ptr);
 //functions
 int zero_out_controller();
 int wait_for_start_condition();
@@ -87,6 +88,7 @@ rc_ringbuf_t d1_in_buf;
 rc_ringbuf_t d1_out_buf;
 rc_ringbuf_t d2_in_buf;
 rc_ringbuf_t d2_out_buf;
+static float soft_start=0;
 
 /*******************************************************************************
 * int main() 
@@ -148,6 +150,10 @@ int main(){
           printf("d2 out ringbuf allocation failed\n");
 	}
 
+	//outer loop thread
+	pthread_t d2_thread;
+	pthread_create(&d2_thread,NULL,outer_loop, (void*) NULL);
+	pthread_setschedprio(d2_thread,60);
 	//sample battery thread
 	pthread_t battery_thread;
 	pthread_create(&battery_thread, NULL, battery_checker, (void*) NULL);
@@ -156,7 +162,6 @@ int main(){
 	while(state.vBatt==0 && rc_get_state()!=EXITING) rc_usleep(1000);
 
 	
-	//start printer if running from terminal
 	pthread_t print_thread;
 	pthread_create(&print_thread,NULL,printer,(void*) NULL);
 	pthread_setschedprio(print_thread,25);
@@ -165,6 +170,7 @@ int main(){
 	//set up IMU configuration
 	rc_imu_config_t imu_config= rc_default_imu_config();
 	imu_config.dmp_sample_rate=SAMPLE_RATE_D1_HZ;
+	imu_config.dmp_interrupt_priority=99;
 	
 	//start imu
 	if(rc_initialize_imu_dmp(&imu_data, imu_config)){
@@ -194,6 +200,7 @@ int main(){
 	// exit cleanly
 	rc_power_off_imu();
 	rc_cleanup(); 
+	rc_disable_motors();
 	if(pthread_join(print_thread,NULL)==0){
 		printf("\nprint thread joined\n");
 	}
@@ -202,6 +209,9 @@ int main(){
 	}
 	if(pthread_join(setpoint_thread,NULL)==0){
 		printf("\nsetpoint thread joined\n");
+	}
+	if(pthread_join(d2_thread,NULL)==0){
+		printf("\nd2_thread joined\n");
 	}
 
 	return 0;
@@ -236,7 +246,6 @@ void* setpoint_manager(void* ptr){
 					}
 			}
 			
-			setpoint.theta=0.0;
 			setpoint.gamma_dot =0.0;
 		}
 		disengage_controller();
@@ -258,10 +267,11 @@ void balancer(){
 	*Complementary filter LPF for Accelerometer and HPF for Gyroscope
 	*
 	*****************************************************************/
+
 	// calculate accel angle of Z over Y
-  float theta_a_raw=atan2(-imu_data.accel[2],imu_data.accel[1]);
+  theta_a_raw=atan2(-imu_data.accel[2],imu_data.accel[1]);
   // Euler integration of gyro data X 
-  static float theta_g_raw=-PI/2;
+  static float theta_g_raw=0;
 	theta_g_raw=theta_g_raw+imu_data.gyro[0]*DT_D1*DEG_TO_RAD;
 
 	//obtain encoder positions and convert to wheel angles
@@ -279,14 +289,18 @@ void balancer(){
 
   //LPF for accelerometer tf=(w*h)/(z+(w*h-1))
   float theta_a=FILTER_W*DT_D1*(accel_in_old-accel_out_old)+accel_out_old;
+ 
   //HPF for gyroscope tf= (z-1)/(z+(w*h-1))
+  //float theta_g=.9983*(theta_g_raw-gyro_in_old)+.9965*gyro_out_old;
   float theta_g=theta_g_raw-gyro_in_old-(FILTER_W*DT_D1-1.0)*gyro_out_old;
-  //update buffer
-  rc_insert_new_ringbuf_value(&accel_out_buf,theta_a);
-  rc_insert_new_ringbuf_value(&gyro_out_buf,theta_g);
 
 	//body theta estimate with an offset included
   state.theta=theta_a+theta_g+MOUNT_ANGLE;
+ printf("theta is %f",state.theta); 
+	//update buffer
+  rc_insert_new_ringbuf_value(&accel_out_buf,theta_a);
+  rc_insert_new_ringbuf_value(&gyro_out_buf,theta_g);
+
 	//average wheel rotation with body rotation 
 	state.phi=((state.wheelAngleL+state.wheelAngleR)/2)+state.theta;
 	//steering angle 
@@ -313,7 +327,7 @@ void balancer(){
 	//check for a tipover
 	if(fabs(state.theta)>TIP_ANGLE){
 		disengage_controller();
-		printf("\ntip detected \n");
+		printf("\ntip detected state.theta %f\n",state.theta);
 		return;
 	}
 
@@ -322,22 +336,27 @@ void balancer(){
  * Input to D1 is theta error(setpoint-state). Then scale output u to compensate
  * for changing battery voltage.
 *******************************************************************************/
-	float d1_gain=D1_GAIN; //*(V_NOMINAL/state.vBatt);
-	float u1;
 	rc_insert_new_ringbuf_value(&d1_in_buf,setpoint.theta-state.theta);
-	//u1=rc_get_ringbuf_value(&d1_out_buf,0);
-	//rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
+	
+	/*float d1_gain=D1_GAIN *(V_NOMINAL/state.vBatt);
 	float theta      =rc_get_ringbuf_value(&d1_in_buf,0);
 	float theta_last =rc_get_ringbuf_value(&d1_in_buf,1);
 	float theta_last2=rc_get_ringbuf_value(&d1_in_buf,2);
 	float u1_last    =rc_get_ringbuf_value(&d1_out_buf,1);
+	
+	printf("\n uout= %f",u1_last);
 	float u1_last2   =rc_get_ringbuf_value(&d1_out_buf,2);
-	u1=d1_gain*(3.093*theta-4.86000*theta_last+1.84*theta_last2)+1.379000*u1_last	\
-			 																			-0.3793*u1_last2;
-	printf("\n uout= %f",theta);
-	state.d1_out=u1;
+	state.d1_out=-1.0*d1_gain*(3.55*theta-5.86300*theta_last+2.382*theta_last2) \
+									+1.407*u1_last-0.04066*u1_last2;
 	rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
-
+	*/
+	state.d1_out=-1.0*soft_start*D1_GAIN*(3.55*rc_get_ringbuf_value(&d1_in_buf,0) \
+													  -5.863*rc_get_ringbuf_value(&d1_in_buf,1) \
+														+2.382*rc_get_ringbuf_value(&d1_in_buf,2))\
+							 							+1.407*rc_get_ringbuf_value(&d1_out_buf,1)
+														-.04066*rc_get_ringbuf_value(&d1_out_buf,2);
+	rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
+	
 /*******************************************************************************
 *Inner loop saturation check if saturated over a second disable controller
 *
@@ -351,12 +370,16 @@ void balancer(){
 		inner_saturation_counter = 0;
 		return;
 	}
+	if(soft_start<1)soft_start+=.1;
+	if(soft_start>=1)soft_start=1;
+
 
 /*******************************************************************************
  * Send signal to motors
  * add D1 balance control u and D3 steering control
  *multiplied by polarity to enure direction
 *******************************************************************************/
+
 	dutyL=state.d1_out;//-state.d3_out;
 	dutyR=state.d1_out;//+state.d3_out;
 	rc_set_motor(MOTOR_CHANNEL_L,MOTOR_POLARITY_L * dutyL);
@@ -379,7 +402,7 @@ int zero_out_controller(){
 	rc_reset_ringbuf(&d1_out_buf);
 	rc_reset_ringbuf(&d2_in_buf);
 	rc_reset_ringbuf(&d2_out_buf);
-
+	
 	setpoint.theta =0.0f;
 	setpoint.phi   =0.0f;
 	setpoint.gamma =0.0f;
@@ -405,6 +428,7 @@ int disengage_controller(){
 * zero out the controller & encoders. Enable motors & arm the controller.
 *******************************************************************************/
 int engage_controller(){
+	soft_start=0;
 	zero_out_controller();
 	rc_set_encoder_pos(ENCODER_CHANNEL_L,0);
 	rc_set_encoder_pos(ENCODER_CHANNEL_R,0);
@@ -435,6 +459,7 @@ int wait_for_start_condition(){
 		if(checks>= checks_needed) break;
 		rc_usleep(wait_us);
 	}
+	
 	//wait for Mip to be upright 
 	checks =0;
 	// exit if state is set to paused or exiting
@@ -503,6 +528,30 @@ void* printer(void* ptr){
 	}
 	return NULL;
 }		
+
+/*******************************************************************************
+ * Outer loop thread()
+ * change theta setpoint based on phi
+ * input to the controller is phi error(setpoint-state)
+ *
+*******************************************************************************/
+void* outer_loop(void* ptr){
+	
+	while(rc_get_state()!=EXITING){
+		if(setpoint.control_state==ENGAGED){
+			rc_insert_new_ringbuf_value(&d2_in_buf,setpoint.phi-state.phi);
+			state.d2_out=D2_GAIN*(.1543*rc_get_ringbuf_value(&d2_in_buf,0)   \
+													 -.1439*rc_get_ringbuf_value(&d2_in_buf,1))  \
+													 +.5596*rc_get_ringbuf_value(&d2_out_buf,1);
+			rc_insert_new_ringbuf_value(&d2_out_buf,state.d2_out);	
+		if(state.d2_out >THETA_REF_MAX) state.d2_out=THETA_REF_MAX;
+		if(state.d2_out <-THETA_REF_MAX) state.d2_out=-THETA_REF_MAX;
+		}
+		rc_usleep(1000000 / SAMPLE_RATE_D2_HZ);
+	}
+	return NULL;
+}
+
 
 /*******************************************************************************
  * battery_checker()
