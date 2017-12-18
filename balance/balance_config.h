@@ -13,7 +13,7 @@
 #define DT_D2 		  	 0.05		// 1/sample_rate
 
 //Physical Properties
-#define MOUNT_ANGLE  	  	 0.29 
+#define MOUNT_ANGLE  	  	 0.34 
 #define GEARBOX		  	 35.57
 #define ENCODER_RES	  	 60
 #define WHEEL_RADIUS_M	  	 0.034
@@ -21,13 +21,23 @@
 #define V_NOMINAL	  	 7.4
 
 // inner loop controller 100hz
-#define D1_GAIN		   	 1.09000
+#define D1_GAIN		   	 0.990
+#define D1_NUM 					{-3.093, 4.860,-1.840}
+#define D1_DEN					{1 , -1.379, .3793}
 #define D1_SATURATION_TIMEOUT	 0.4
-#define FILTER_W		 0.660     	 //complementary filter frequency
+#define FILTER_W		 0.550     	 //complementary filter frequency
 
 //outer loop controller 20hz
-#define D2_GAIN 				1.00
+#define D2_GAIN 				0.83
 #define THETA_REF_MAX			.33
+#define D2_NUM 					{.1543,-.1439}
+#define D2_DEN					{1, -.5596}
+
+//steering correction 
+#define D3_GAIN 			1.10
+#define D3_NUM           {.15432, -.14390}
+#define D3_DEN					 {1.00, -.5596}
+#define STEERING_INPUT_MAX 0.5
 
 // electrical hookups
 #define MOTOR_CHANNEL_L		 3
@@ -46,7 +56,7 @@
 
 // other
 #define TIP_ANGLE		 0.85
-#define START_ANGLE		 0.3
+#define START_ANGLE		 0.2
 #define START_DELAY		 0.40
 #define PICKUP_DETECTION_TIME	 0.5
 #endif	//BALANCE_CONFIG

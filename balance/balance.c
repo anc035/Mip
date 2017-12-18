@@ -2,7 +2,9 @@
 * balance.c
 *
 * Balance code for BeagleBone Blue and EduMip
-* 
+* Includes a D1 inner loop for balancing, a D2 outer loop for keeping Mip near 
+* setpoint, a D3 steering controller to correct any turning caused by the first 
+* two controllers.
 *******************************************************************************/
 
 // main roboticscape API header
@@ -13,7 +15,6 @@
 // function declarations
 void on_pause_pressed();
 void on_pause_released();
-void comp_filter(float* theta_a,float* theta_g,float* theta_current);
 
 /*******************************************************************************
 * control_state_t
@@ -28,19 +29,18 @@ typedef enum control_state_t{
 /*******************************************************************************
 * setpoint_t
 * 
-* Controller setpoint written by setpoint_mgr and read by controller
+* stores setpoints
 *******************************************************************************/
 typedef struct setpoint_t{
 	control_state_t control_state;
 	float theta;		//body theta radians
 	float phi;		// wheel position radians
 	float gamma;		//body turn angle radians
-	float gamma_dot;	// rate of gamma setpoint updates radians/s
 }setpoint_t;
 /*******************************************************************************
-* sys_state_t
+* core_state_t 
 * System information
-*
+* 
 *******************************************************************************/
 typedef struct core_state_t{
 	float wheelAngleL; //wheel angle
@@ -52,7 +52,6 @@ typedef struct core_state_t{
 	float d1_out;	   //output to motors
 	float d2_out;	   //theta_ref
 	float d3_out;	   //steering output
-	float mot_drive;   //output correction for battery voltage	
 } core_state_t;
 
 /*******************************************************************************
@@ -80,17 +79,17 @@ int engage_controller();
 core_state_t state;
 setpoint_t setpoint;
 rc_imu_data_t imu_data;
-rc_ringbuf_t accel_in_buf;
-rc_ringbuf_t accel_out_buf;
-rc_ringbuf_t gyro_in_buf;
-rc_ringbuf_t gyro_out_buf;
 rc_ringbuf_t d1_in_buf;
 rc_ringbuf_t d1_out_buf;
 rc_ringbuf_t d2_in_buf;
 rc_ringbuf_t d2_out_buf;
+rc_ringbuf_t d3_in_buf;
+rc_ringbuf_t d3_out_buf;
+
 static float soft_start=0;
-float theta_a=0.0f;
-	float theta_g=0.0f; //ale
+float theta_a=0.0;
+float theta_g=0.0; //ale
+
 
 
 /*******************************************************************************
@@ -117,29 +116,17 @@ int main(){
 	rc_set_led(GREEN,0);
 	rc_set_state(UNINITIALIZED);
 
+	// start with Disengaged state to detect when Mip is picked up
 	setpoint.control_state = DISENGAGED;
-	//setup ring bufs
-  accel_in_buf =rc_empty_ringbuf();
-  accel_out_buf=rc_empty_ringbuf();
-  gyro_in_buf  =rc_empty_ringbuf();
-  gyro_out_buf =rc_empty_ringbuf();
+	//empty  ring bufs 
 	d1_in_buf    =rc_empty_ringbuf();
 	d1_out_buf   =rc_empty_ringbuf();
 	d2_in_buf    =rc_empty_ringbuf();
 	d2_out_buf   =rc_empty_ringbuf();
+	d3_in_buf    =rc_empty_ringbuf();
+	d3_out_buf   =rc_empty_ringbuf();
 	
-  if(rc_alloc_ringbuf(&accel_in_buf,4)<0){
-          printf("accel in ringbuf allocation failed\n");
-  }
-  if(rc_alloc_ringbuf(&accel_out_buf,4)<0){
-          printf("accel out ringbuf allocation failed\n");
-  }
-  if(rc_alloc_ringbuf(&gyro_in_buf,4)<0){
-          printf("gyro in ringbuf allocation failed\n");
-  }
-  if(rc_alloc_ringbuf(&gyro_out_buf,4)<0){
-          printf("gyro out ringbuf allocation failed\n");
-  }
+  
 	if(rc_alloc_ringbuf(&d1_in_buf,4)<0){
           printf("d1 in ringbuf allocation failed\n");
 	}
@@ -151,6 +138,12 @@ int main(){
 	}
 	if(rc_alloc_ringbuf(&d2_out_buf,4)<0){
           printf("d2 out ringbuf allocation failed\n");
+	}	
+	if(rc_alloc_ringbuf(&d3_in_buf,4)<0){
+          printf("d3 in ringbuf allocation failed\n");
+	}
+	if(rc_alloc_ringbuf(&d3_out_buf,4)<0){
+          printf("d3 out ringbuf allocation failed\n");
 	}
 
 		//outer loop thread
@@ -164,7 +157,7 @@ int main(){
 	//wait for battery thread to make first read
 	while(state.vBatt==0 && rc_get_state()!=EXITING) rc_usleep(1000);
 
-	
+	//printer thread to print to screen 	
 	pthread_t print_thread;
 	pthread_create(&print_thread,NULL,printer,(void*) NULL);
 	pthread_setschedprio(print_thread,25);
@@ -192,6 +185,7 @@ int main(){
 
 	// Keep looping until state changes to EXITING
 	while(rc_get_state()!=EXITING){
+		//detect starting condition(when Mip is picked up
 		if(setpoint.control_state ==DISENGAGED){
 				if(wait_for_start_condition()==0){
 					engage_controller();
@@ -229,54 +223,54 @@ int main(){
 * called at SAMPLE_RATE_HZ (See configuration file)
 *******************************************************************************/
 void balancer(){
+	//initializing variables
 	static int inner_saturation_counter =0;
 	float dutyL,dutyR;
-	comp_filter(&theta_a,&theta_g,&state.theta);
+	float	d1_num[]=D1_NUM;
+	float	d1_den[]=D1_DEN;
+	float d3_num[]=D3_NUM;
+	float d3_den[]=D3_DEN;
+
 	
 	/*****************************************************************
 	*Complementary filter LPF for Accelerometer and HPF for Gyroscope
-	*
+	* Used for state estimation
 	*****************************************************************/
-	/*
+	//initialize values to zero	
 	float theta_a_raw=0;
-	// calculate accel angle of Z over Y
-  theta_a_raw=atan2(-imu_data.accel[2],imu_data.accel[1]);
-  // Euler integration of gyro data X 
-  static float theta_g_raw=0;
-	theta_g_raw=theta_g_raw+(imu_data.gyro[0]*(float)DT_D1*DEG_TO_RAD);
-	
-	//obtain encoder positions and convert to wheel angles
-	state.wheelAngleR=(rc_get_encoder_pos(ENCODER_CHANNEL_R)*TWO_PI )\
-				/(ENCODER_POLARITY_R * GEARBOX *ENCODER_RES);
-       	state.wheelAngleL=(rc_get_encoder_pos(ENCODER_CHANNEL_L)*TWO_PI )\
-				/(ENCODER_POLARITY_L * GEARBOX *ENCODER_RES);
-	//input body angle estimate into ringbuffers
-	rc_insert_new_ringbuf_value(&accel_in_buf,theta_a_raw);
-  rc_insert_new_ringbuf_value(&gyro_in_buf,theta_g_raw);
-  float accel_in_old=rc_get_ringbuf_value(&accel_in_buf,1);
-  float accel_out_old=rc_get_ringbuf_value(&accel_out_buf,1);
-  float gyro_in_old=rc_get_ringbuf_value(&gyro_in_buf,1);
-  float gyro_out_old=rc_get_ringbuf_value(&gyro_out_buf,1);
+	static float theta_g_raw = 0;
+	static float last_theta_a_raw = 0;
+	static float last_theta_g_raw = 0;
+	static float last_theta_a = 0;
+	static float last_theta_g = 0;
+	//calculate angle from acceleration data
+	theta_a_raw = atan2(-imu_data.accel[2],imu_data.accel[1]);
+	//calculate rotation from start with gyro data
+	theta_g_raw = theta_g_raw + DT_D1*(imu_data.gyro[0]*DEG_TO_RAD) ;
+	// Low Pass Filter for accelerometer
+	theta_a = (FILTER_W*DT_D1*last_theta_a_raw)+((1-(FILTER_W*DT_D1))*last_theta_a);
+	// High pass filter for gyroscope
+	theta_g = (1-(FILTER_W*DT_D1))*last_theta_g + theta_g_raw - last_theta_g_raw;
+	//get theta 
+	state.theta = theta_a + theta_g + MOUNT_ANGLE;
 
-  //LPF for accelerometer tf=(w*h)/(z+(w*h-1))
-  float theta_a=FILTER_W*DT_D1*accel_in_old+((1-(FILTER_W*DT_D1))*accel_out_old);
- 
-  //HPF for gyroscope tf= (z-1)/(z+(w*h-1))
-  float theta_g=theta_g_raw-gyro_in_old+(1-(FILTER_W*DT_D1))*gyro_out_old;
+	//set last stuff
+	last_theta_a = theta_a;
+	last_theta_g = theta_g;
+	last_theta_g_raw = theta_g_raw;
+	last_theta_a_raw = theta_a_raw;
 
-	//body theta estimate with an offset included
-  state.theta=theta_a+theta_g+MOUNT_ANGLE;
- printf("theta is %f",state.theta); 
-	//update buffer
-  rc_insert_new_ringbuf_value(&accel_out_buf,theta_a);
-  rc_insert_new_ringbuf_value(&gyro_out_buf,theta_g);
+		//steering angle  calculation
+	state.wheelAngleR= (rc_get_encoder_pos(ENCODER_CHANNEL_R) *TWO_PI)\
+												 /(ENCODER_POLARITY_R *GEARBOX *ENCODER_RES);
+	state.wheelAngleL= (rc_get_encoder_pos(ENCODER_CHANNEL_L) *TWO_PI)\
+												 /(ENCODER_POLARITY_L *GEARBOX *ENCODER_RES);
 
-	//average wheel rotation with body rotation 
-	state.phi=((state.wheelAngleL+state.wheelAngleR)/2)+state.theta;
-	//steering angle 
 	state.gamma =(state.wheelAngleR-state.wheelAngleL) \
-					*(WHEEL_RADIUS_M/TRACK_WIDTH_M);
-*/
+										*(WHEEL_RADIUS_M/TRACK_WIDTH_M);
+
+	
+
 	
 	/*******************************************************
 	*check for exit conditions after state estimation
@@ -297,7 +291,7 @@ void balancer(){
 
 	//check for a tipover
 	if(fabs(state.theta)>TIP_ANGLE){
-		//disengage_controller();
+		disengage_controller();
 		printf("\ntip detected state.theta %f\n",state.theta);
 		return;
 	}
@@ -309,23 +303,11 @@ void balancer(){
 *******************************************************************************/
 	rc_insert_new_ringbuf_value(&d1_in_buf,setpoint.theta-state.theta);
 	
-	/*float d1_gain=D1_GAIN *(V_NOMINAL/state.vBatt);
-	float theta      =rc_get_ringbuf_value(&d1_in_buf,0);
-	float theta_last =rc_get_ringbuf_value(&d1_in_buf,1);
-	float theta_last2=rc_get_ringbuf_value(&d1_in_buf,2);
-	float u1_last    =rc_get_ringbuf_value(&d1_out_buf,1);
-	
-	printf("\n uout= %f",u1_last);
-	float u1_last2   =rc_get_ringbuf_value(&d1_out_buf,2);
-	state.d1_out=-1.0*d1_gain*(3.55*theta-5.86300*theta_last+2.382*theta_last2) \
-									+1.407*u1_last-0.04066*u1_last2;
-	rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
-	*/
-	state.d1_out=soft_start*D1_GAIN*(-3.55*rc_get_ringbuf_value(&d1_in_buf,0) \
-													  +5.863*rc_get_ringbuf_value(&d1_in_buf,1) \
-														-2.382*rc_get_ringbuf_value(&d1_in_buf,2))\
-							 							+1.407*rc_get_ringbuf_value(&d1_out_buf,1)
-														-.04066*rc_get_ringbuf_value(&d1_out_buf,2);
+	state.d1_out=soft_start*D1_GAIN*(d1_num[0]*rc_get_ringbuf_value(&d1_in_buf,0) \
+													  +(d1_num[1]*rc_get_ringbuf_value(&d1_in_buf,1)) \
+														+(d1_num[2]*rc_get_ringbuf_value(&d1_in_buf,2))\
+							 							-(d1_den[1]*rc_get_ringbuf_value(&d1_out_buf,0))
+														-(d1_den[2]*rc_get_ringbuf_value(&d1_out_buf,1)));
 	rc_insert_new_ringbuf_value(&d1_out_buf,state.d1_out);
 	
 /*******************************************************************************
@@ -344,6 +326,18 @@ void balancer(){
 	if(soft_start<1)soft_start+=.1;
 	if(soft_start>=1)soft_start=1;
 
+/*******************************************************************************
+ * D3 controller for gamma changes
+ * 
+*******************************************************************************/
+
+	rc_insert_new_ringbuf_value(&d3_in_buf,setpoint.gamma-state.gamma);
+	state.d3_out=D3_GAIN*((d3_num[0]*rc_get_ringbuf_value(&d3_in_buf,0)) \
+											+(d3_num[1]*rc_get_ringbuf_value(&d3_in_buf,1)) \
+											-(d3_den[1]*rc_get_ringbuf_value(&d3_out_buf,0)));
+	rc_insert_new_ringbuf_value(&d3_out_buf,state.d3_out);
+	//if the output of D3 is over  a value set it equal to that value
+	if(fabs(state.d3_out) >STEERING_INPUT_MAX) state.d3_out=STEERING_INPUT_MAX;
 
 /*******************************************************************************
  * Send signal to motors
@@ -351,8 +345,8 @@ void balancer(){
  *multiplied by polarity to enure direction
 *******************************************************************************/
 
-	dutyL=state.d1_out;-state.d3_out;
-	dutyR=state.d1_out;+state.d3_out;
+	dutyL =state.d1_out-state.d3_out;
+	dutyR =state.d1_out+state.d3_out;
 	rc_set_motor(MOTOR_CHANNEL_L,MOTOR_POLARITY_L * dutyL);
 	rc_set_motor(MOTOR_CHANNEL_R,MOTOR_POLARITY_R * dutyR);
 
@@ -365,14 +359,12 @@ void balancer(){
 * Clear the controller's memory and zero out setpoints. 
 *******************************************************************************/
 int zero_out_controller(){
-	rc_reset_ringbuf(&accel_in_buf);
-	rc_reset_ringbuf(&accel_out_buf);
-	rc_reset_ringbuf(&gyro_in_buf);
-	rc_reset_ringbuf(&gyro_out_buf);
 	rc_reset_ringbuf(&d1_in_buf);
 	rc_reset_ringbuf(&d1_out_buf);
 	rc_reset_ringbuf(&d2_in_buf);
 	rc_reset_ringbuf(&d2_out_buf);
+	rc_reset_ringbuf(&d3_out_buf);
+	rc_reset_ringbuf(&d3_out_buf);
 	
 	setpoint.theta =0.0f;
 	setpoint.phi   =0.0f;
@@ -384,7 +376,7 @@ int zero_out_controller(){
 /*******************************************************************************
 * disengage_controller()
 *
-* disable motors & set the setpoint.core_mode to DISENGAGED
+* disable motors & set the control_state to DISENGAGED
 *******************************************************************************/
 int disengage_controller(){
 	rc_disable_motors();
@@ -396,7 +388,7 @@ int disengage_controller(){
 /*******************************************************************************
 * engage_controller()
 *
-* zero out the controller & encoders. Enable motors & arm the controller.
+* zero out the controller & encoders. Enable motors & engage  the controller.
 *******************************************************************************/
 int engage_controller(){
 	soft_start=0;
@@ -450,7 +442,7 @@ int wait_for_start_condition(){
 /*******************************************************************************
 * printer
 *
-* prints status to console only started if executing from terminal.
+* prints status to the screen
 *******************************************************************************/
 void* printer(void* ptr){
 	rc_state_t last_rc_state, new_rc_state; //keeping track of previous state
@@ -508,13 +500,19 @@ void* printer(void* ptr){
  *
 *******************************************************************************/
 void* outer_loop(void* ptr){
-	
+	float d2_num[]=D2_NUM;
+	float d2_den[]=D2_DEN;
+
 	while(rc_get_state()!=EXITING){
-		if(setpoint.control_state==ENGAGED){
+		if(rc_get_state()==RUNNING && setpoint.control_state==ENGAGED){
+			
+			//average wheel rotation with body rotation 
+			state.phi=((state.wheelAngleL+state.wheelAngleR)/2)+state.theta;
+
 			rc_insert_new_ringbuf_value(&d2_in_buf,setpoint.phi-state.phi);
-			state.d2_out=D2_GAIN*(.1543*rc_get_ringbuf_value(&d2_in_buf,0)   \
-													 -.1439*rc_get_ringbuf_value(&d2_in_buf,1))  \
-													 +.5596*rc_get_ringbuf_value(&d2_out_buf,1);
+			state.d2_out=D2_GAIN*(d2_num[0]*rc_get_ringbuf_value(&d2_in_buf,0)   \
+													 +(d2_num[1]*rc_get_ringbuf_value(&d2_in_buf,1))  \
+													 -(d2_den[1]*rc_get_ringbuf_value(&d2_out_buf,0)));
 			rc_insert_new_ringbuf_value(&d2_out_buf,state.d2_out);	
 			setpoint.theta=state.d2_out;
 		if(state.d2_out >THETA_REF_MAX) state.d2_out=THETA_REF_MAX;
@@ -575,33 +573,3 @@ void on_pause_pressed(){
 	rc_set_state(EXITING);
 	return;
 }
-
-//----------------------Comp Filter---------------------------------
-//----Determines the Body Angle of the MIP using a low pass and high pass filter--
-void comp_filter(float* theta_a,float* theta_g, float* theta_current){
-	//define variables
-	float dt = .01;
-	float w = FILTER_W;
-	float theta_a_raw=0;
-	static float theta_g_raw = 0;
-	static float last_theta_a_raw = 0;
-	static float last_theta_g_raw = 0;
-	static float last_theta_a = 0;
-	static float last_theta_g = 0;
-	//calculate angle from acceleration data
-	theta_a_raw = atan2(-imu_data.accel[2],imu_data.accel[1]);
-	//calculate rotation from start with gyro data
-	theta_g_raw = theta_g_raw + (float)dt*(imu_data.gyro[0]*DEG_TO_RAD) ;
-	//apply low pass filter on accelerometer
-	*theta_a = (w*dt*last_theta_a_raw)+((1-(w*dt))*last_theta_a);
-	//apply high pass filter on theta_g_raw
-	*theta_g = (1-(w*dt))*last_theta_g + theta_g_raw - last_theta_g_raw;
-	//get theta 
-	*theta_current = *theta_a + *theta_g + MOUNT_ANGLE;
-
-	//set last stuff
-	last_theta_a = *theta_a;
-	last_theta_g = *theta_g;
-	last_theta_g_raw = theta_g_raw;
-	last_theta_a_raw = theta_a_raw;
-} 
