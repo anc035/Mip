@@ -13,7 +13,7 @@
 #define DT_D2 		  	 0.05		// 1/sample_rate
 
 //Physical Properties
-#define MOUNT_ANGLE  	  	 0.35 
+#define MOUNT_ANGLE  	  	 0.36 
 #define GEARBOX		  	 35.57
 #define ENCODER_RES	  	 60
 #define WHEEL_RADIUS_M	  	 0.034
@@ -34,7 +34,7 @@
 #define D2_DEN					{1, -.5596}
 
 //steering correction 
-#define D3_GAIN 			1.13
+#define D3_GAIN 			1.35
 #define D3_NUM           {.15432, -.14390}
 #define D3_DEN					 {1.00, -.5596}
 #define STEERING_INPUT_MAX 0.6
@@ -57,6 +57,6 @@
 // other
 #define TIP_ANGLE		 0.85
 #define START_ANGLE		 0.2
-#define START_DELAY		 0.60
+#define START_DELAY		 0.65
 #define PICKUP_DETECTION_TIME	 0.5
 #endif	//BALANCE_CONFIG
