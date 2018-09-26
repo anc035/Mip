@@ -338,6 +338,7 @@ void balancer(){
 	rc_insert_new_ringbuf_value(&d3_out_buf,state.d3_out);
 	//if the output of D3 is over  a value set it equal to that value
 	if(fabs(state.d3_out) >STEERING_INPUT_MAX) state.d3_out=STEERING_INPUT_MAX;
+	if(fabs(state.d3_out)<-STEERING_INPUT_MAX) state.d3_out=-STEERING_INPUT_MAX;
 
 /*******************************************************************************
  * Send signal to motors
