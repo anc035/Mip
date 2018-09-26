@@ -34,10 +34,10 @@
 #define D2_DEN					{1, -.5596}
 
 //steering correction 
-#define D3_GAIN 			1.35
+#define D3_GAIN 			1.85
 #define D3_NUM           {.15432, -.14390}
 #define D3_DEN					 {1.00, -.5596}
-#define STEERING_INPUT_MAX 0.6
+#define STEERING_INPUT_MAX 0.5
 
 // electrical hookups
 #define MOTOR_CHANNEL_L		 3
